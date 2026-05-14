@@ -21,7 +21,7 @@ RTSP_URL = "rtsp://your_camera_ip:554/stream"
 
 # ─── Optional: sound player ──────────────────────────────────────────────────
 try:
-    from soundplayer import start_sound, stop_sound
+    from soundplayer import start_sound as playsound, stop_sound as stopsound
 except ImportError:
     def playsound():
         print("[SoundPlayer stub]  playsound()")
@@ -150,7 +150,7 @@ def _get_wifi_rssi() -> int:
 #  – Puts a copy of raw frames into a queue consumed by DetectionThread.
 # =============================================================================
 class CameraThread(QThread):
-    frame_ready    = pyqtSignal(QImage)   # tilt-corrected live frame → centre
+    frame_ready    = pyqtSignal(np.ndarray)   # tilt-corrected live frame → centre
     status_changed = pyqtSignal(str)      # "connecting" | "live" | "error"
 
     def __init__(self, url, frame_event: threading.Event, parent=None):
@@ -207,7 +207,10 @@ class CameraThread(QThread):
 
         while self._running:
             self.status_changed.emit("connecting")
-            cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+            try:
+                cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+            except:
+                cap = cv2.VideoCapture(self.url)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
             if not cap.isOpened():
@@ -247,7 +250,7 @@ class CameraThread(QThread):
                     self._rec_writer.write(frame)
 
                 # ── Emit live frame ──────────────────────────────────────
-                self.frame_ready.emit(self._bgr_to_qimage(frame))
+                self.frame_ready.emit(frame)
 
                 # ── Share frame with detection thread ────────────────────
                 # Always overwrite with the freshest frame; the detection
@@ -348,19 +351,18 @@ class DetectionThread(QThread):
             # Run detection — this may take 1-2 s; that is fine.
             # During that time CameraThread keeps overwriting _latest_frame
             # with fresh frames, and we'll pick up the newest one next cycle.
-            try:
-                result = detectwire(frame, self._on_binary)
-            except TypeError:
-                result = detectwire(frame)
+            
+            result = detectwire(frame, self._on_binary)
+            
 
             if result is None:
                 self.result_ready.emit(None)
                 continue
 
-            points, confidence, angle, y_len, coverage = result
+            pointx,pointy, confidence, angle, y_len, coverage = result
             threshold = self._sensitivity / 100.0
             if confidence >= threshold:
-                self.result_ready.emit((points, confidence, angle, y_len, coverage))
+                self.result_ready.emit((pointx,pointy, confidence, angle, y_len, coverage))
             else:
                 self.result_ready.emit(None)
 
@@ -464,9 +466,34 @@ class CameraFeed(QWidget):
         t = QTimer(self)
         t.timeout.connect(self._do_blink)
         t.start(600)
+    def _draw_wire_points(self,img, pointx,pointy, thickness=1):
+    
+        img_h, img_w = img.shape[:2]
+        xs = pointx                 #np.clip(undist_points[:, 0].astype(np.int32), 0, img_w - 1)
+        ys = pointy                 #np.clip(undist_points[:, 1].astype(np.int32), 0, img_h - 1)
 
-    def set_live_frame(self, qimg: QImage):
-        self._live_pix   = QPixmap.fromImage(qimg)
+        if thickness <= 1:
+            img[ys, xs] = (0, 0, 255)
+        else:
+            mask = np.zeros((img_h, img_w), dtype=np.uint8)
+            mask[ys, xs] = 255
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE, (thickness * 2 + 1, thickness * 2 + 1))
+            mask = cv2.dilate(mask, kernel, iterations=1)
+            img[mask > 0] = (0, 0, 255)
+
+
+    def _bgr_to_qimage(self,bgr):
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        return QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888).copy()
+
+
+    def set_live_frame(self, qimg:np.ndarray):
+        if self._det_active and self._det_points:
+            pointx,pointy=self._det_points
+            self._draw_wire_points(qimg,pointx,pointy)
+        self._live_pix   = QPixmap.fromImage(self._bgr_to_qimage(qimg))
         self._cam_status = "live"
         self.update()
 
@@ -474,20 +501,17 @@ class CameraFeed(QWidget):
         self._cam_status = s
         self.update()
 
-    def set_detection_points(self, points, src_w: int, src_h: int):
+    def set_detection_points(self, pointx,pointy, src_w: int, src_h: int):
         """
         Store detection points and convert to normalised coords.
         points: list/array of (x, y) pixel coords in the original frame space.
         src_w, src_h: dimensions of the frame detectwire ran on.
         """
-        if points is None or len(points) == 0:
+        if pointx is None or len(pointx) == 0:
             self._det_points = None
             self._det_active = False
         else:
-            self._det_points = [
-                (float(px) / src_w, float(py) / src_h)
-                for px, py in points
-            ]
+            self._det_points = (pointx,pointy)
             self._det_active = True
         self.update()
 
@@ -533,20 +557,21 @@ class CameraFeed(QWidget):
 
         # ── Red detection point overlay ──────────────────────────────────
         if self._det_active and self._det_points:
-            DOT_R    = 6
-            HALO_R   = 11
-            dot_col  = QColor("#ef4444")          # solid red dot
-            halo_col = QColor(239, 68, 68, 70)    # translucent red halo
-            for nx, ny in self._det_points:
-                cx = int(nx * w)
-                cy = int(ny * h)
-                # Halo
-                p.setBrush(halo_col); p.setPen(Qt.NoPen)
-                p.drawEllipse(cx - HALO_R, cy - HALO_R, HALO_R * 2, HALO_R * 2)
-                # Solid dot
-                p.setBrush(dot_col)
-                p.drawEllipse(cx - DOT_R, cy - DOT_R, DOT_R * 2, DOT_R * 2)
-            # Blinking "WIRE DETECTED" banner while active
+            # DOT_R    = 6
+            # HALO_R   = 11
+            # dot_col  = QColor("#ef4444")          # solid red dot
+            # halo_col = QColor(239, 68, 68, 70)    # translucent red halo
+            # pointx,pointy=self._det_points
+            # for nx, ny in self._det_points:
+            #     cx = int(nx * w)
+            #     cy = int(ny * h)
+            #     # Halo
+            #     p.setBrush(halo_col); p.setPen(Qt.NoPen)
+            #     p.drawEllipse(cx - HALO_R, cy - HALO_R, HALO_R * 2, HALO_R * 2)
+            #     # Solid dot
+            #     p.setBrush(dot_col)
+            #     p.drawEllipse(cx - DOT_R, cy - DOT_R, DOT_R * 2, DOT_R * 2)
+            # # Blinking "WIRE DETECTED" banner while active
             if self._blink:
                 p.fillRect(0, 0, w, 40, QColor(0, 0, 0, 180))
                 p.setFont(QFont("Consolas", 11, QFont.Bold))
@@ -1469,8 +1494,14 @@ class WireDetectorApp(QMainWindow):
 
     def _on_detect_result(self, result):
         if self._left.detection_mode == "manual":
-            # Manual mode: binary view updates (via binary_ready signal) but
-            # main view and panels are untouched.
+            if self._sound_playing:
+                self._cam_feed.clear_detection_points()
+                self._right.hide_wire_info()
+                try:
+                    stopsound()
+                except Exception as exc:
+                    print(f"[SoundPlayer] stopsound() error: {exc}")
+                self._sound_playing = False
             return
 
         # ── AUTO mode ─────────────────────────────────────────────────
@@ -1491,7 +1522,7 @@ class WireDetectorApp(QMainWindow):
 
         # Wire detected — reset the clear streak
         self._clear_streak = 0
-        points, confidence, angle, y_len, coverage = result
+        pointx,pointy, confidence, angle, y_len, coverage = result
 
         # Determine the source frame dimensions for normalisation.
         # get_latest_frame() gives us the frame detectwire just ran on.
@@ -1503,7 +1534,7 @@ class WireDetectorApp(QMainWindow):
             src_w, src_h = 1, 1
 
         # Draw red dots on the live view (persists across non-detected frames)
-        self._cam_feed.set_detection_points(points, src_w, src_h)
+        self._cam_feed.set_detection_points(pointx,pointy, src_w, src_h)
 
         # Update wire info panel on every detection
         self._right.show_wire_info(confidence, angle, y_len, coverage)
@@ -1541,7 +1572,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    url="rtsp://admin:123456789!@192.168.1.100:554/StreamingChannels/101"
+    url="rtsp://admin:123456789!@192.168.1.100:554/ch1/sub"
 
     rtsp_source = int(url.strip()) if url.strip().isdigit() else url.strip()
     win = WireDetectorApp(rtsp_source)

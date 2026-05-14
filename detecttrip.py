@@ -4,7 +4,6 @@ import numpy as np
 from skimage.filters import threshold_sauvola
 import time
 import math
-from skimage.morphology import skeletonize
 from sklearn.linear_model import RANSACRegressor
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.pipeline import make_pipeline
@@ -12,13 +11,14 @@ from scipy.integrate import quad
 
 
 
-with np.load("highrescalib.npz") as data:
-    mtx, dist = data['K'], data['dist']
+# with np.load("highrescalib.npz") as data:
+#     mtx, dist = data['K'], data['dist']
 
-map1=None
-map2=None
+# map1=None
+# map2=None
 
-
+mtx=None
+dist=None
 
 
 
@@ -151,6 +151,9 @@ def score_wire_candidate(mask: np.ndarray,
         return None
     angle,length,abc,pointx,pointy=data
 
+    if (angle>45 and angle<135) or (angle>225 and angle<315):
+        return None
+
 
     # x1, y1, x2, y2 = line[0]
     # angle = np.abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
@@ -257,8 +260,8 @@ def undistort_points(points_xy: np.ndarray,
 def detect_wire(frame,callbackimg):
     global mtx
     global dist
-    global map1
-    global map2
+    # global map1
+    # global map2
     img_h, img_w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
@@ -290,12 +293,14 @@ def detect_wire(frame,callbackimg):
         return None
 
     
-    result=frame.copy()
+    # result=frame.copy()
 
     # result = cv2.remap(frame, map1, map2, interpolation=cv2.INTER_NEAREST)
-    _draw_wire_points(result,best['pointx'],best['pointy'])
+    # _draw_wire_points(result,best['pointx'],best['pointy'])
 
-    return result, best["score"],best["angle_deg"],best["y_center"],best["coverage"]
+    return best["pointx"],best["pointy"], best["score"],best["angle_deg"],best["y_center"],best["coverage"]
+
+    # return result, best["score"],best["angle_deg"],best["y_center"],best["coverage"]
 
 
 if __name__ == "__main__":
