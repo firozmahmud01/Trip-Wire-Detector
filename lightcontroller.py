@@ -14,6 +14,7 @@ PTZ_URL = f"http://{IP_ADDRESS}:{PORT}/onvif/ptz_service"
 
 def send_ptz_command(xml_body):
     """Sends the SOAP envelope to the camera."""
+
     headers = {
         'Content-Type': 'application/soap+xml; charset=utf-8',
     }
@@ -23,7 +24,7 @@ def send_ptz_command(xml_body):
             data=xml_body, 
             headers=headers, 
             auth=HTTPDigestAuth(USER, PASS),
-            timeout=5
+            timeout=1
         )
         return response.status_code
     except Exception as e:
@@ -123,13 +124,15 @@ def set_night_vision(turn_on=True):
         </timg:SetImagingSettings>
       </s:Body>
     </s:Envelope>"""
-
-    response = requests.post(imagingurl, data=soap_body, headers=headers, auth=HTTPDigestAuth(USER, PASS))
-    
-    if response.status_code == 200:
-        print(f"✅ Success! Night Vision: {ir_mode}")
-    else:
-        print(f"❌ Error {response.status_code}: {response.text}")
+    try:
+        response = requests.post(imagingurl, data=soap_body, headers=headers, auth=HTTPDigestAuth(USER, PASS), timeout=1)
+        
+        if response.status_code == 200:
+            print(f"✅ Success! Night Vision: {ir_mode}")
+        else:
+            print(f"❌ Error {response.status_code}: {response.text}")
+    except:
+        pass
     
 def getCurrentImageSettings():
     """Fetches current brightness, contrast, saturation, and sharpness."""
@@ -147,30 +150,46 @@ def getCurrentImageSettings():
         </timg:GetImagingSettings>
       </s:Body>
     </s:Envelope>"""
+    try:
+        response = requests.post(imagingurl, data=soap_body, headers=headers, auth=HTTPDigestAuth(USER, PASS), timeout=1)
+        
+        if response.status_code == 200:
+            # Simple way to parse the XML response for values
+            root = ET.fromstring(response.text)
+            # Namespaces can be tricky in XML, so we find tags ignoring them
+            def find_val(tag):
+                for el in root.iter():
+                    if tag in el.tag: return el.text
+                return "N/A"
 
-    response = requests.post(imagingurl, data=soap_body, headers=headers, auth=HTTPDigestAuth(USER, PASS))
-    
-    if response.status_code == 200:
-        # Simple way to parse the XML response for values
-        root = ET.fromstring(response.text)
-        # Namespaces can be tricky in XML, so we find tags ignoring them
-        def find_val(tag):
-            for el in root.iter():
-                if tag in el.tag: return el.text
-            return "N/A"
-
-        settings = {
-            "BacklightCompensation": find_val("IrCutFilter"),
-            "Brightness":            find_val("Brightness"),
-            "ColorSaturation":       find_val("ColorSaturation"),
-            "Contrast":              find_val("Contrast"),
-            "Focus":                 1.0,
-            "Sharpness":             find_val("Sharpness")
-        }
-        return settings
-    else:
-        print(f"❌ Failed to get settings: {response.status_code}")
-        return None
+            settings = {
+                "BacklightCompensation": find_val("IrCutFilter"),
+                "Brightness":            find_val("Brightness"),
+                "ColorSaturation":       find_val("ColorSaturation"),
+                "Contrast":              find_val("Contrast"),
+                "Focus":                 1.0,
+                "Sharpness":             find_val("Sharpness")
+            }
+            return settings
+        else:
+            print(f"❌ Failed to get settings: {response.status_code}")
+            return {
+                "BacklightCompensation": 50,
+                "Brightness":            50,
+                "ColorSaturation":       50,
+                "Contrast":              50,
+                "Focus":                 1.0,
+                "Sharpness":             50
+            }
+    except:
+        return {
+                "BacklightCompensation": 50,
+                "Brightness":            50,
+                "ColorSaturation":       50,
+                "Contrast":              50,
+                "Focus":                 1.0,
+                "Sharpness":             50
+            }
 
 
 
@@ -199,6 +218,8 @@ def changeimagesettings(kwargs):
         </timg:SetImagingSettings>
       </s:Body>
     </s:Envelope>"""
-
-    response = requests.post(imagingurl, data=soap_body, headers=headers, auth=HTTPDigestAuth(USER, PASS))
-    print(f"Update Status: {response.status_code}")
+    try:
+        response = requests.post(imagingurl, data=soap_body, headers=headers, auth=HTTPDigestAuth(USER, PASS),timeout=1)
+        print(f"Update Status: {response.status_code}")
+    except:
+        pass
