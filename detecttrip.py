@@ -3,12 +3,33 @@ import cv2
 import numpy as np
 from skimage.filters import threshold_sauvola
 import time
+import math
 from skimage.morphology import skeletonize
+from sklearn.linear_model import RANSACRegressor
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import make_pipeline
+from scipy.integrate import quad
 
-with np.load("lowrescalib.npz") as data:
+
+
+with np.load("highrescalib.npz") as data:
     mtx, dist = data['K'], data['dist']
 
-def showimg(img):
+map1=None
+map2=None
+
+
+
+
+
+
+
+
+
+
+
+
+def showimg(img,title="image"):
     (h, w) = len(img),len(img[0])
 
     # 2. Define new width and calculate new height
@@ -18,26 +39,10 @@ def showimg(img):
 
     # 3. Resize the image
     resized_img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
-    cv2.imshow("image",resized_img)
+    cv2.imshow(title,resized_img)
 
 
-def test_thresholding_methods(img):
-    # ==========================================
-    # Method 2: Adaptive (Local) Thresholding
-    # ==========================================
-    # Parameters to tune for your specific wire:
-    block_size = 15  # Size of a pixel neighborhood (must be an odd number: 3, 5, 7, 11, 15...)
-    C = 5            # Constant subtracted from the mean. Increase this to remove more background noise.
-    
-    adaptive_result = cv2.adaptiveThreshold(
-        img, 255, 
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, # Uses a weighted sum of neighborhood pixels
-        cv2.THRESH_BINARY_INV,          # Inverts so dark wire is white
-        block_size, 
-        C
-    )
-    showimg(adaptive_result)
-    cv2.waitKey(0)
+
     
 def analyze_wire_segment(segment):
     global mtx
@@ -76,125 +81,97 @@ def analyze_wire_segment(segment):
 
 
 
-def find_horizontal_segment(points_xy, max_y_deviation=5, min_segment_length=50):
-    """
-    Find longest segment where:
-    - X is increasing (already sorted)
-    - Y doesn't deviate more than max_y_deviation from a rolling average
-    """
-    if len(points_xy) == 0:
-        return None
 
-    xs = points_xy[:, 0]
-    ys = points_xy[:, 1]
-
-    best_start = 0
-    best_end = 0
-    current_start = 0
-
-    for i in range(1, len(points_xy)):
-        # Get Y reference from current segment start
-        segment_ys = ys[current_start:i]
-        y_ref = np.median(segment_ys)  # use median for robustness
-
-        # If Y deviates too much, start a new segment
-        if abs(ys[i] - y_ref) > max_y_deviation:
-            # Check if current segment is the best so far
-            if (i - 1 - current_start) > (best_end - best_start):
-                best_start = current_start
-                best_end = i - 1
-            current_start = i  # start fresh from this point
-
-    # Final check for last segment
-    if (len(points_xy) - 1 - current_start) > (best_end - best_start):
-        best_start = current_start
-        best_end = len(points_xy) - 1
-
-    segment = points_xy[best_start:best_end + 1]
-
-    if len(segment) < min_segment_length:
-        return None
-
-    return segment
+def get_midpoint(p1, p2):
+    # p1 and p2 are tuples or lists like (x, y)
+    mx = (p1[0] + p2[0]) / 2
+    my = (p1[1] + p2[1]) / 2
+    return (mx, my)
 
 
-
+ransac=RANSACRegressor(residual_threshold=5.0)
+def analyze_wire(binary_image):
+    global ransac
+    # 1. Extract coordinates of all white pixels (the wire + noise)
+    y_coords, x_coords = np.where(binary_image > 0)
     
+    if len(x_coords) < 10:
+        return None
+
+    X = x_coords.reshape(-1, 1)
+
+    # 2. RANSAC + Polynomial Fit (Degree 2)
+    # This ignores noise/attachments and fits the most dominant curve/line
+    model = make_pipeline(PolynomialFeatures(degree=2), ransac)
+    model.fit(X, y_coords)
+
+    # 3. Extract the math coefficients
+    # Formula: y = ax^2 + bx + c
+    ransac = model.named_steps['ransacregressor']
+    poly = model.named_steps['polynomialfeatures']
+    
+    # Coefficients are usually [1, x, x^2] in poly features, so:
+    # coef_ will be [0, b, a]
+    b = ransac.estimator_.coef_[1]
+    a = ransac.estimator_.coef_[2]
+    c = ransac.estimator_.intercept_
+
+    # 4. Identify Matching Points (Inliers)
+    # This separates the wire pixels from the table/noise pixels
+    inlier_mask = ransac.inlier_mask_
+    wire_points_x = x_coords[inlier_mask]
+    wire_points_y = y_coords[inlier_mask]
+    
+    # 5. Calculate Length (Arc Length Integration)
+
+    def integrand(x):
+        return np.sqrt(1 + (2 * a * x + b)**2)
+
+    x_min, x_max = wire_points_x.min(), wire_points_x.max()
+    wire_length, _ = quad(integrand, x_min, x_max)
+
+    # 6. Calculate Angle
+    # We calculate the chord angle (start point to end point) for general orientation
+    # This works perfectly for tilted 45 degree lines or straight lines.
+    y_start = a * x_min**2 + b * x_min + c
+    y_end = a * x_max**2 + b * x_max + c
+    
+    angle_rad = np.arctan2(y_end - y_start, x_max - x_min)
+    angle_deg = np.degrees(angle_rad)
+
+    return angle_deg,wire_length, (a, b, c),wire_points_x,wire_points_y
+    
+
 def score_wire_candidate(mask: np.ndarray,
                           img_w: int,
                           img_h: int) -> dict:
 
-    skeleton = skeletonize(mask // 255).astype(np.uint8) * 255
-    points = np.column_stack(np.where(skeleton > 0))
-    points_xy = points[:, ::-1].astype(np.float32)  # (x, y)
-
-    # Sort by X (left to right)
-    points_xy = points_xy[np.argsort(points_xy[:, 0])]
-    segment = find_horizontal_segment(points_xy, max_y_deviation=8, min_segment_length=30)
-    
-    result = analyze_wire_segment(segment)
-    if result is None:
+    data=analyze_wire(mask)
+    if data is None:
         return None
+    angle,length,abc,pointx,pointy=data
+
+
+    # x1, y1, x2, y2 = line[0]
+    # angle = np.abs(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
     
-    angle_deg, length_px,p_start, p_end, vx, vy, x0, y0, undistorted=result
-
-
-    angle_score = max(0.0, 1.0 - abs(angle_deg) / 45.0)
-    coverage = length_px / img_w
+    # Filter for nearly horizontal lines (e.g., within 5 degrees of 0)
+    # if angle < 45 or (angle > 135 and angle<225) or angle>315:
+        
+    angle_score = max(0.0, 1.0 - abs(angle) / 45.0)
+    coverage = length / (img_w*0.8)
     coverage_score = min(coverage, 1.0)
-    score = (angle_score    * 0.50 +
-             coverage_score * 0.50)
+    score = (angle_score    * 0.30 +
+            coverage_score * 0.70)
 
-    return {
+    return{
         "score":         score,
-        "angle_deg":     angle_deg,
-        "coverage":      coverage,
-        "y_center":      float(y0[0]),
-        "points":        segment,
+        "angle_deg":     angle,
+        "coverage":      coverage_score,
+        "y_center":      pointy[0],
+        "pointx":        pointx,
+        "pointy":        pointy
     }
-
-    # old one
-    # ys, xs = np.where(mask)
-    # if len(xs) < 10:
-    #     return None
-
-    # points = np.column_stack([xs, ys]).astype(np.float32)
-    # # ── Fit a line ────────────────────────────────────────────────────────────
-    # vx, vy, cx, cy = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01)
-    # vx, vy, cx, cy = float(vx[0]), float(vy[0]), float(cx[0]), float(cy[0])
-    # angle_deg = float(np.degrees(np.arctan2(vy, vx)))
-    # # Normalise to -90..90
-    # angle_deg = (angle_deg + 90) % 180 - 90
-
-    # # ── Horizontal angle penalty ──────────────────────────────────────────────
-    # # score = 1 when angle = 0°, drops to 0 at ±45°
-    # angle_score = max(0.0, 1.0 - abs(angle_deg) / 45.0)
-
-    # # ── Width coverage ────────────────────────────────────────────────────────
-    # x_span = int(xs.max()) - int(xs.min())
-    # coverage = x_span / img_w
-    # coverage_score = min(coverage / 0.8, 1.0)   # saturates at 80 % width
-
-    # # ── Meijering response quality ────────────────────────────────────────────
-    
-
-    # # ── Thinness: low height spread relative to point count ───────────────────
-    # y_spread = int(ys.max()) - int(ys.min())
-    # thin_score = max(0.0, 1.0 - y_spread / (img_h * 0.05))
-
-    # # ── Composite confidence ──────────────────────────────────────────────────
-    # score = (angle_score    * 0.35 +
-    #          coverage_score * 0.35 +
-    #          1     * 0.15 +
-    #          thin_score     * 0.15)
-
-    # return {
-    #     "score":         score,
-    #     "angle_deg":     angle_deg,
-    #     "coverage":      coverage,
-    #     "y_center":      float(cy),
-    #     "points":        points,
-    # }
 
 
 def findbestwire(binary,minwidthpercent):
@@ -223,6 +200,7 @@ def findbestwire(binary,minwidthpercent):
     for lab in mylabels:
         mymask = np.isin(labels, lab+1).astype(np.uint8) * 255
         candidate = score_wire_candidate(mymask, img_w, img_h)
+        
         if candidate is None:
             continue
         if best is None or candidate["score"] > best["score"]:
@@ -235,7 +213,7 @@ def findbestwire(binary,minwidthpercent):
     # return wire_mask
 
 
-def _draw_wire_points(img, undist_points, thickness=2):
+def _draw_wire_points(img, pointx,pointy, thickness=2):
     """
     Paint the actual undistorted wire pixel positions onto the image in red.
     Pixel-accurate — no fitted line involved.
@@ -243,12 +221,11 @@ def _draw_wire_points(img, undist_points, thickness=2):
     undist_points : (N, 2) float array of (x, y) in undistorted image space.
     thickness     : dilation radius so the wire stays visible (1=single pixel).
     """
-    if undist_points is None or len(undist_points) == 0:
-        return
+    
 
     img_h, img_w = img.shape[:2]
-    xs = np.clip(undist_points[:, 0].astype(np.int32), 0, img_w - 1)
-    ys = np.clip(undist_points[:, 1].astype(np.int32), 0, img_h - 1)
+    xs = pointx                 #np.clip(undist_points[:, 0].astype(np.int32), 0, img_w - 1)
+    ys = pointy                 #np.clip(undist_points[:, 1].astype(np.int32), 0, img_h - 1)
 
     if thickness <= 1:
         img[ys, xs] = (0, 0, 255)
@@ -275,21 +252,13 @@ def undistort_points(points_xy: np.ndarray,
     return corrected.reshape(-1, 2)
 
 
-def _draw_wire(img, vx, vy, cx, cy, img_w, confidence):
-    """Draw a red line across the full image width."""
-    if abs(vx) < 1e-6:
-        return
-    t_left  = (0  - cx) / vx
-    t_right = (img_w - cx) / vx
-    pt1 = (0,     int(cy + t_left  * vy))
-    pt2 = (img_w, int(cy + t_right * vy))
 
-    cv2.line(img, pt1, pt2, (0, 0, 255), 2, cv2.LINE_AA)
 
-    
 def detect_wire(frame,callbackimg):
     global mtx
     global dist
+    global map1
+    global map2
     img_h, img_w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     
@@ -300,54 +269,47 @@ def detect_wire(frame,callbackimg):
 
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 1))
     binary = cv2.morphologyEx(output, cv2.MORPH_OPEN, kernel)
+
+    # if map1 is None or map2 is None:
+    #     R = np.eye(3, dtype=np.float32)
+
+    #     # 2. Compute optimal new camera matrix
+    #     # alpha=0 crops, alpha=1 keeps all original pixels
+    #     newCameraMatrix, roi = cv2.getOptimalNewCameraMatrix(
+    #         mtx, dist, (img_w, img_h), alpha=0, newImgSize=(img_w, img_h)
+    #     )
+    #     map1, map2 = cv2.initUndistortRectifyMap(mtx, dist, R, newCameraMatrix, (img_w,img_h), cv2.CV_32FC1)
     
+
+    # undistorted_img = cv2.remap(binary, map1, map2, interpolation=cv2.INTER_NEAREST)
     callbackimg(binary)
 
     best=findbestwire(binary,minwidthpercent=0.3)
     
-    if best is None or best["score"] < 0.45:
-        # No wire — return original with overlay
+    if best is None:
         return None
 
-    # ── 6. Undistort the detected wire *points* ───────────────────────────────
-    raw_pts = best["points"]                       # (N, 2) in distorted image
-    corrected_pts = undistort_points(raw_pts, mtx, dist)
-
-    # ── 7. Fit a clean line through undistorted points ────────────────────────
-    # vx, vy, cx, cy = cv2.fitLine(
-    #     corrected_pts.astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01)
-    # vx, vy, cx, cy = float(vx[0]), float(vy[0]), float(cx[0]), float(cy[0])
-
-    # Compute undistorted full image for output (visualisation only)
-    result = cv2.undistort(frame, mtx, dist)
-    _draw_wire_points(result,corrected_pts)
-    # ── 8. Draw the wire in red ───────────────────────────────────────────────
     
-    # _draw_wire(result, vx, vy, cx, cy, img_w, best["score"])
+    result=frame.copy()
 
-    # info = {
-    #     "score":         best["score"],
-    #     "angle_deg":     best["angle_deg"],
-    #     "coverage":      best["coverage"],
-    #     "y_center":      best["y_center"],
-    #     "line_params":   (float(vx), float(vy), float(cx), float(cy)),
-    # }
-    # marked, confidence, angle, y_len, coverage
+    # result = cv2.remap(frame, map1, map2, interpolation=cv2.INTER_NEAREST)
+    _draw_wire_points(result,best['pointx'],best['pointy'])
 
     return result, best["score"],best["angle_deg"],best["y_center"],best["coverage"]
 
 
 if __name__ == "__main__":
-    img=cv2.imread("tripimage/image5.png")
+    img=cv2.imread("tripimage/image1.png")
     def something(data):
-        pass
+        showimg(data,"binary")
     prev=time.perf_counter()
     output=detect_wire(img,something)
+    print("Time:"+str(time.perf_counter()-prev))
     if output is None:
         print("Nothing found")
         exit()
     result, score,angle, y_center, coverage=output
-    print("Time:"+str(time.perf_counter()-prev))
     print(score)
+    
     showimg(result)
     cv2.waitKey(0)
