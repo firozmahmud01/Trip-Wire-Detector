@@ -88,59 +88,84 @@ def get_midpoint(p1, p2):
     my = (p1[1] + p2[1]) / 2
     return (mx, my)
 
+ransac = RANSACRegressor(residual_threshold=5.0)
 
-ransac=RANSACRegressor(residual_threshold=5.0)
-def analyze_wire(binary_image):
+def _find_largest_chunk(x_coords, y_coords, gap_threshold=10):
+    """
+    Given inlier points, find the largest contiguous chunk by x-coordinate gaps.
+    Points within gap_threshold pixels horizontally are considered connected.
+    Returns indices of the largest chunk.
+    """
+    if len(x_coords) == 0:
+        return np.array([], dtype=int)
+
+    # Sort all inlier points by x
+    sort_idx = np.argsort(x_coords)
+    x_sorted = x_coords[sort_idx]
+
+    # Find where gaps between consecutive x-values exceed the threshold
+    gaps = np.diff(x_sorted) > gap_threshold
+    split_points = np.where(gaps)[0] + 1  # indices where new chunks begin
+
+    # Build chunk index arrays
+    chunk_indices = np.split(sort_idx, split_points)
+
+    # Return the chunk with the most points
+    largest = max(chunk_indices, key=len)
+    return largest
+
+
+def analyze_wire(binary_image, gap_threshold=10):
     global ransac
-    # 1. Extract coordinates of all white pixels (the wire + noise)
+
+    # 1. Extract coordinates of all white pixels
     y_coords, x_coords = np.where(binary_image > 0)
-    
+
     if len(x_coords) < 10:
         return None
 
     X = x_coords.reshape(-1, 1)
 
     # 2. RANSAC + Polynomial Fit (Degree 2)
-    # This ignores noise/attachments and fits the most dominant curve/line
     model = make_pipeline(PolynomialFeatures(degree=2), ransac)
     model.fit(X, y_coords)
 
-    # 3. Extract the math coefficients
-    # Formula: y = ax^2 + bx + c
+    # 3. Extract coefficients:  y = ax² + bx + c
     ransac = model.named_steps['ransacregressor']
-    poly = model.named_steps['polynomialfeatures']
-    
-    # Coefficients are usually [1, x, x^2] in poly features, so:
-    # coef_ will be [0, b, a]
     b = ransac.estimator_.coef_[1]
     a = ransac.estimator_.coef_[2]
     c = ransac.estimator_.intercept_
 
-    # 4. Identify Matching Points (Inliers)
-    # This separates the wire pixels from the table/noise pixels
+    # 4. Get all RANSAC inliers
     inlier_mask = ransac.inlier_mask_
-    wire_points_x = x_coords[inlier_mask]
-    wire_points_y = y_coords[inlier_mask]
-    
-    # 5. Calculate Length (Arc Length Integration)
+    inlier_x = x_coords[inlier_mask]
+    inlier_y = y_coords[inlier_mask]
 
+    if len(inlier_x) == 0:
+        return None
+
+    # 5. Keep ONLY the largest contiguous chunk (removes disconnected blobs)
+    chunk_idx = _find_largest_chunk(inlier_x, inlier_y, gap_threshold)
+    wire_points_x = inlier_x[chunk_idx]
+    wire_points_y = inlier_y[chunk_idx]
+
+    if len(wire_points_x) < 2:
+        return None
+
+    # 6. Arc Length Integration over the chunk's x-range only
     def integrand(x):
-        return np.sqrt(1 + (2 * a * x + b)**2)
+        return np.sqrt(1 + (2 * a * x + b) ** 2)
 
     x_min, x_max = wire_points_x.min(), wire_points_x.max()
     wire_length, _ = quad(integrand, x_min, x_max)
 
-    # 6. Calculate Angle
-    # We calculate the chord angle (start point to end point) for general orientation
-    # This works perfectly for tilted 45 degree lines or straight lines.
+    # 7. Chord Angle
     y_start = a * x_min**2 + b * x_min + c
-    y_end = a * x_max**2 + b * x_max + c
-    
+    y_end   = a * x_max**2 + b * x_max + c
     angle_rad = np.arctan2(y_end - y_start, x_max - x_min)
     angle_deg = np.degrees(angle_rad)
 
-    return angle_deg,wire_length, (a, b, c),wire_points_x,wire_points_y
-    
+    return angle_deg, wire_length, (a, b, c), wire_points_x, wire_points_y
 
 def score_wire_candidate(mask: np.ndarray,
                           img_w: int,

@@ -1,162 +1,204 @@
-from onvif import ONVIFCamera
+import requests
+from requests.auth import HTTPDigestAuth
+import xml.etree.ElementTree as ET
+
+IP_ADDRESS = '192.168.1.100' 
+PORT = 80            
+USER = 'admin'
+PASS = '123456789!' 
+
+PROFILE_TOKEN = "Profile_1" 
 
 
-CAMERA_IP = '192.168.1.100' 
-CAMERA_PORT = 80            
-USERNAME = 'admin'
+PTZ_URL = f"http://{IP_ADDRESS}:{PORT}/onvif/ptz_service"
 
-PASSWORD = '123456789!' 
+def send_ptz_command(xml_body):
+    """Sends the SOAP envelope to the camera."""
+    headers = {
+        'Content-Type': 'application/soap+xml; charset=utf-8',
+    }
+    try:
+        response = requests.post(
+            PTZ_URL, 
+            data=xml_body, 
+            headers=headers, 
+            auth=HTTPDigestAuth(USER, PASS),
+            timeout=5
+        )
+        return response.status_code
+    except Exception as e:
+        print(f"Connection Error: {e}")
+        return None
 
-def changeimagesettings(kwargs):
-    cam = ONVIFCamera(CAMERA_IP, CAMERA_PORT, USERNAME, PASSWORD)
-
-    media = cam.create_media_service()
-    imaging = cam.create_imaging_service()
-
-    profile = media.GetProfiles()[0]
-
-    video_source_token = profile.VideoSourceConfiguration.SourceToken
-
-    req = imaging.create_type('SetImagingSettings')
-    req.VideoSourceToken = video_source_token
-    del kwargs['BacklightCompensation']
-    del kwargs['Focus']
-    print(kwargs)
-    req.ImagingSettings = kwargs
-
-    req.ForcePersistence = True
-
-    imaging.SetImagingSettings(req)
-
-def getCurrentImageSettings():
-    return {
-            "BacklightCompensation": "OFF",
-            "Brightness":            50.0,
-            "ColorSaturation":       50.0,
-            "Contrast":              50.0,
-            "Focus":                 1.0,
-            "Sharpness":             50.0,
-        }
-    cam = ONVIFCamera(CAMERA_IP, CAMERA_PORT, USERNAME, PASSWORD)
-
-    media = cam.create_media_service()
-    imaging = cam.create_imaging_service()
-
-    profile = media.GetProfiles()[0]
-
-    video_source_token = profile.VideoSourceConfiguration.SourceToken
-
-    req = imaging.create_type('GetImagingSettings')
-    req.VideoSourceToken = video_source_token
-
-    settings = imaging.GetImagingSettings(req)
-    settings['BacklightCompensation']=settings['BacklightCompensation']['Mode']
-    settings['Focus']=settings['Focus']['DefaultSpeed']
-    return settings
-
-ptz=None
-ptz_profile_token=None
-def movecamera(key: str):
-    global ptz
-    global ptz_profile_token
-    mycam = ONVIFCamera(CAMERA_IP, CAMERA_PORT, USERNAME, PASSWORD)
-    ptz = mycam.create_ptz_service()
-    media = mycam.create_media_service()
+def movecamera(direction, velocity=0.5):
+    """Moves the camera: up, down, left, right."""
+    # Mapping directions to X (Pan) and Y (Tilt) vectors
+    vectors = {
+        "up":    {'x': 0, 'y': velocity},
+        "down":  {'x': 0, 'y': -velocity},
+        "left":  {'x': -velocity, 'y': 0},
+        "right": {'x': velocity, 'y': 0}
+    }
     
-    # Get the first media profile
-    profile = media.GetProfiles()[0]
-    ptz_profile_token = profile.token
+    v = vectors.get(direction, {'x': 0, 'y': 0})
+    
+    soap_body = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+      <s:Body>
+        <tptz:ContinuousMove>
+          <tptz:ProfileToken>{PROFILE_TOKEN}</tptz:ProfileToken>
+          <tptz:Velocity>
+            <tt:PanTilt x="{v['x']}" y="{v['y']}"/>
+          </tptz:Velocity>
+        </tptz:ContinuousMove>
+      </s:Body>
+    </s:Envelope>"""
+    
+    send_ptz_command(soap_body)
+    print(f"Moving {direction}...")
 
-    # Create a move request template
-    request = ptz.create_type('ContinuousMove')
-    request.ProfileToken = ptz_profile_token
-    SPEED=1
-    if key == "up":
-        x,y=(0, SPEED)
-    elif key == "down":
-        x,y=(0, -SPEED)
-    elif key == "left":
-        x,y=(-SPEED, 0)
-    elif key == "right":
-        x,y=(SPEED, 0)
-    move_request = {
-            'ProfileToken': ptz_profile_token,
-            'Velocity': {
-                'PanTilt': {
-                    'x': x,
-                    'y': y,
-                    'space': 'http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace'
-                }
-            }
-        }
-    ptz.ContinuousMove(move_request)
+
+
+
+
+
+
+
 
 def stopcamera():
-    global ptz
-    global ptz_profile_token
-    if ptz is not None:
-        ptz.Stop({'ProfileToken': ptz_profile_token})
+    """Stops all PTZ movement."""
+    soap_body = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+      <s:Body>
+        <tptz:Stop>
+          <tptz:ProfileToken>{PROFILE_TOKEN}</tptz:ProfileToken>
+          <tptz:PanTilt>true</tptz:PanTilt>
+          <tptz:Zoom>true</tptz:Zoom>
+        </tptz:Stop>
+      </s:Body>
+    </s:Envelope>"""
+    
+    send_ptz_command(soap_body)
+    print("PTZ Stopped.")
+
+
 
 def startIr(isOn):
-    if isOn:
-        control_ezviz_camera(CAMERA_IP, CAMERA_PORT, USERNAME, PASSWORD, night_vision=True)
-        print("IR on")
-    else:
-        control_ezviz_camera(CAMERA_IP, CAMERA_PORT, USERNAME, PASSWORD, night_vision=False)
-        print("IR Off")
-
-
-
-
-
-def control_ezviz_camera(ip, port, user, password, night_vision=None):
-    
-    mycam = ONVIFCamera(ip, port, user, password)
-
-    
-    media_service = mycam.create_media_service()
-    profiles = media_service.GetProfiles()
-    
-    if not profiles:
-        print("No media profiles found on this camera.")
-        return
-        
-    video_source_token = profiles[0].VideoSourceConfiguration.SourceToken
-    profile_token = profiles[0].token
-
-    # 3. Control Night Vision (IR Cut Filter)
-    if night_vision is not None:
-        imaging_service = mycam.create_imaging_service()
-        
-        # Map user-friendly boolean to ONVIF IrCutFilter modes
-        
-        if night_vision is True:
-            ir_mode = "OFF" # Filter OFF = Night Vision ON
+    try:
+        if isOn:
+            set_night_vision(True)
         else:
-            ir_mode = "ON"  # Filter ON = Night Vision OFF
-            
-        print(f"Fetching current imaging settings to apply IR mode: {ir_mode}...")
-        
-        # Get current settings
-        settings = imaging_service.GetImagingSettings(video_source_token)
-        
-        # Update the IR Cut Filter property
-        settings.IrCutFilter = ir_mode
-        
-        # EZVIZ cameras sometimes return unparseable Extension data. 
-        # Clearing it out prevents Zeep XML validation errors when sending settings back.
-        settings.Extension = None 
-        
-        # Create the request
-        request = imaging_service.create_type('SetImagingSettings')
-        request.VideoSourceToken = video_source_token
-        request.ImagingSettings = settings
-        request.ForcePersistence = True # Save settings after camera reboot
-        
-        try:
-            imaging_service.SetImagingSettings(request)
-            print(f"✅ Night Vision successfully set to: {night_vision} (Filter: {ir_mode})")
-        except Exception as e:
-            print(f"❌ Failed to set Night Vision. Error: {e}")
+            set_night_vision(False)
+    except Exception as e:
+        print(e)
 
+
+
+
+imagingurl = f"http://{IP_ADDRESS}:{PORT}/onvif/imaging_service"
+
+def set_night_vision(turn_on=True):
+    global imagingurl
+    VIDEO_SOURCE_TOKEN = "VideoSource_1"
     
+    ir_mode = "OFF" if turn_on else "ON"
+    
+    # Critical: EZVIZ sometimes needs the action in the header
+    headers = {
+        'Content-Type': 'application/soap+xml; charset=utf-8',
+        'SOAPAction': '"http://www.onvif.org/ver20/imaging/wsdl/SetImagingSettings"'
+    }
+
+    soap_body = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" 
+                xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" 
+                xmlns:tt="http://www.onvif.org/ver10/schema">
+      <s:Body>
+        <timg:SetImagingSettings>
+          <timg:VideoSourceToken>{VIDEO_SOURCE_TOKEN}</timg:VideoSourceToken>
+          <timg:ImagingSettings>
+            <tt:IrCutFilter>{ir_mode}</tt:IrCutFilter>
+          </timg:ImagingSettings>
+          <timg:ForcePersistence>true</timg:ForcePersistence>
+        </timg:SetImagingSettings>
+      </s:Body>
+    </s:Envelope>"""
+
+    response = requests.post(imagingurl, data=soap_body, headers=headers, auth=HTTPDigestAuth(USER, PASS))
+    
+    if response.status_code == 200:
+        print(f"✅ Success! Night Vision: {ir_mode}")
+    else:
+        print(f"❌ Error {response.status_code}: {response.text}")
+    
+def getCurrentImageSettings():
+    """Fetches current brightness, contrast, saturation, and sharpness."""
+    VIDEO_SOURCE_TOKEN = "VideoSource_1"
+    headers = {
+        'Content-Type': 'application/soap+xml; charset=utf-8',
+        'SOAPAction': '"http://www.onvif.org/ver20/imaging/wsdl/GetImagingSettings"'
+    }
+    
+    soap_body = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl">
+      <s:Body>
+        <timg:GetImagingSettings>
+          <timg:VideoSourceToken>{VIDEO_SOURCE_TOKEN}</timg:VideoSourceToken>
+        </timg:GetImagingSettings>
+      </s:Body>
+    </s:Envelope>"""
+
+    response = requests.post(imagingurl, data=soap_body, headers=headers, auth=HTTPDigestAuth(USER, PASS))
+    
+    if response.status_code == 200:
+        # Simple way to parse the XML response for values
+        root = ET.fromstring(response.text)
+        # Namespaces can be tricky in XML, so we find tags ignoring them
+        def find_val(tag):
+            for el in root.iter():
+                if tag in el.tag: return el.text
+            return "N/A"
+
+        settings = {
+            "BacklightCompensation": find_val("IrCutFilter"),
+            "Brightness":            find_val("Brightness"),
+            "ColorSaturation":       find_val("ColorSaturation"),
+            "Contrast":              find_val("Contrast"),
+            "Focus":                 1.0,
+            "Sharpness":             find_val("Sharpness")
+        }
+        return settings
+    else:
+        print(f"❌ Failed to get settings: {response.status_code}")
+        return None
+
+
+
+def changeimagesettings(kwargs):
+    VIDEO_SOURCE_TOKEN = "VideoSource_1"
+    
+    headers = {
+        'Content-Type': 'application/soap+xml; charset=utf-8',
+        'SOAPAction': '"http://www.onvif.org/ver20/imaging/wsdl/SetImagingSettings"'
+    }
+
+    soap_body = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" 
+                xmlns:timg="http://www.onvif.org/ver20/imaging/wsdl" 
+                xmlns:tt="http://www.onvif.org/ver10/schema">
+      <s:Body>
+        <timg:SetImagingSettings>
+          <timg:VideoSourceToken>{VIDEO_SOURCE_TOKEN}</timg:VideoSourceToken>
+          <timg:ImagingSettings>
+            <tt:Brightness>{kwargs['Brightness']}</tt:Brightness>
+            <tt:Contrast>{kwargs['Contrast']}</tt:Contrast>
+            <tt:ColorSaturation>{kwargs['ColorSaturation']}</tt:ColorSaturation>
+            <tt:Sharpness>{kwargs['Sharpness']}</tt:Sharpness>
+          </timg:ImagingSettings>
+          <timg:ForcePersistence>true</timg:ForcePersistence>
+        </timg:SetImagingSettings>
+      </s:Body>
+    </s:Envelope>"""
+
+    response = requests.post(imagingurl, data=soap_body, headers=headers, auth=HTTPDigestAuth(USER, PASS))
+    print(f"Update Status: {response.status_code}")
